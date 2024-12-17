@@ -1,0 +1,109 @@
+import requests
+from bs4 import BeautifulSoup
+from sentence_transformers import SentenceTransformer
+import faiss
+import openai
+import time
+
+# Initialize the embedding model
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')  # A lightweight embedding model
+vector_dimension = embedding_model.get_sentence_embedding_dimension()
+
+# Initialize FAISS vector database
+index = faiss.IndexFlatL2(vector_dimension)  # L2 distance for similarity search
+metadata_store = []  # To store metadata like chunks and source URLs
+
+# Replace with your actual OpenAI API key
+openai.api_key = "sk-proj-M5T8uy7n6zd06A9VV4l9GKLi4A6FgadDzII-N88u94vyT1zPoQ0we4nZ6ZvPb8yxCNEZJPpleST3BlbkFJDueT5Muw6yrYssv7hBIZ-lJdJO4ooRPDzRcPrAml8I4XTZ9frxp13cCIZEHX48uDNK-_89MsA"
+
+# Validate OpenAI API key and plan
+def validate_api_key():
+    try:
+        openai.Engine.list()
+        print("OpenAI API key is valid.")
+    except openai.error.AuthenticationError:
+        print("Invalid API key. Please check and update your OpenAI API key.")
+        exit()
+    except openai.error.RateLimitError:
+        print("You have hit your rate limit. Please check your OpenAI billing plan.")
+        exit()
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        exit()
+
+# Crawl and scrape content from websites
+def crawl_and_scrape(url):
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    paragraphs = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4'])
+    content = [p.get_text(strip=True) for p in paragraphs]
+    return content
+
+# Convert chunks into embeddings and store in FAISS
+def process_and_store(content, url):
+    global metadata_store
+    for chunk in content:
+        embedding = embedding_model.encode(chunk).reshape(1, -1)
+        index.add(embedding)
+        metadata_store.append({"chunk": chunk, "source": url})
+
+# Query handling
+def query_system(query):
+    query_embedding = embedding_model.encode(query).reshape(1, -1)
+    distances, indices = index.search(query_embedding, k=3)
+    retrieved_chunks = [metadata_store[i]['chunk'] for i in indices[0]]
+    return retrieved_chunks
+
+# Generate response with robust retry logic
+def generate_response(query, retrieved_chunks):
+    context = "\n".join(retrieved_chunks)
+    prompt = f"Context: {context}\n\nQuestion: {query}"
+    delay = 2  # Start with 2-second delay
+    
+    for attempt in range(5):  # Retry up to 5 times
+        try:
+            response = openai.Completion.create(
+                model="gpt-3.5-turbo",
+                prompt=prompt,
+                max_tokens=50
+            )
+            return response['choices'][0]['text'].strip()
+        except openai.error.RateLimitError:
+            print(f"Rate limit exceeded. Retrying in {delay} seconds...")
+            time.sleep(delay)
+            delay *= 2  # Double the delay time for each retry
+        except openai.error.OpenAIError as e:
+            print(f"OpenAI Error: {e}")
+            return "OpenAI Error: Unable to generate a response."
+        except Exception as e:
+            print(f"Unexpected Error: {e}")
+            return "Unexpected Error: Unable to generate a response."
+    return "Failed to generate a response after multiple attempts."
+
+# Main function
+if __name__ == "__main__":
+    validate_api_key()
+
+    # Example URLs
+    urls = ["https://example.com"]  # Replace with actual URLs
+    
+    print("Scraping and processing data...")
+    for url in urls:
+        content = crawl_and_scrape(url)
+        process_and_store(content, url)
+    
+    print("System ready! Ask your question.")
+    
+    while True:
+        user_query = input("\nEnter your question: ")
+        if user_query.lower() in ["exit", "quit"]:
+            print("Exiting the system. Goodbye!")
+            break
+
+        retrieved_chunks = query_system(user_query)
+        
+        # Add a delay before generating a response to avoid rate limits
+        time.sleep(10)
+        
+        answer = generate_response(user_query, retrieved_chunks)
+        print(f"\nAnswer: {answer}")
